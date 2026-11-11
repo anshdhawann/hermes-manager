@@ -128,4 +128,4 @@ at `~/.hermes/hermes-agent`.
 
 ## License
 
-Apache License 2.0, see [LICENSE](LICENSE). Not affiliated with Nous Research.
+Apache License 2.0, see [LICENSE](LICENSE). The license covers the code only: the header image (`assets/repo-image.png`) is a widely shared meme that isn't ours, and it is not covered by the license. Not affiliated with Nous Research.
