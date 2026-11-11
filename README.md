@@ -1,6 +1,6 @@
 # hermes-manager
 
-<p align="center"><img src="assets/repo-image.png" alt="Handing an agent the keys to its own plugins" width="560"></p>
+<p align="center"><img src="assets/repo-image.png" alt="Hermes agent being handed hermes-manager" width="560"></p>
 
 A plugin for [Hermes Agent](https://github.com/NousResearch/hermes-agent) that lets Hermes manage its own
 plugins, skills and MCP servers while it runs: no gateway restart, an approval card for anything that is
