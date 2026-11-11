@@ -1,0 +1,24 @@
+name: hermes-manager
+version: 0.3.0
+description: >-
+  Let Hermes manage its own plugins, skills and MCP servers without a restart. Tools: plugin_manager
+  (list, create, enable, disable, delete, rename, reload, log, undo), skill_manager (list, enable, disable) and
+  mcp_manager (list, add, enable, disable, reconnect, login). Things Hermes made itself change with no card;
+  the user's things, every MCP add and installs into ~/.hermes need an approval card in the main chat.
+  Every change is logged (/manager-log) and can be undone (/manager-undo). Also `hermes reload-plugins`
+  and /reload-plugins.
+author: anshdhawann
+license: Apache-2.0
+homepage: https://github.com/anshdhawann/hermes-manager
+manifest_version: 2
+api_version: 1
+requires_hermes: ">=0.22.5"
+tags: [plugins, skills, mcp, reload, dev]
+provides_tools:
+  - plugin_manager
+  - skill_manager
+  - mcp_manager
+provides_hooks:
+  - pre_tool_call
+  - post_tool_call
+requires_env: []

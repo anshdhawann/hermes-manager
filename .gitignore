@@ -1,0 +1,4 @@
+__pycache__/
+*.pyc
+scripts/livetest.log
+.DS_Store
