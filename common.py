@@ -21,6 +21,13 @@ def home() -> Path:
     return Path(get_hermes_home())
 
 
+def plugins_dir() -> Path:
+    """~/.hermes/plugins (created if missing), where user plugins live."""
+    folder = home() / "plugins"
+    folder.mkdir(parents=True, exist_ok=True)
+    return folder
+
+
 def main_chat_id() -> Optional[str]:
     """The newest pinned chat in the default profile. None when state.db cannot be read."""
     try:
@@ -56,6 +63,36 @@ def read_config() -> dict[str, Any]:
 def save_config(cfg: dict[str, Any]) -> None:
     from hermes_cli.config import save_config as _save
     _save(cfg)
+
+
+SETTINGS_ID = "hermes-manager"
+
+
+def setting(key: str, default: Any = None) -> Any:
+    """``plugins.entries.hermes-manager.settings.<key>`` as written in config.yaml (read fresh each call)."""
+    try:
+        node: Any = read_config()
+        for part in ("plugins", "entries", SETTINGS_ID, "settings", key):
+            node = node.get(part) if isinstance(node, dict) else None
+        return default if node is None else node
+    except Exception:
+        return default
+
+
+def trust_own_items() -> bool:
+    """True only when the user set ``trust_own_items: true``: then Hermes turns on and edits plugins it made
+    with no card. Off by default, and anything but a real ``true`` counts as off (fails toward a card)."""
+    return setting("trust_own_items") is True
+
+
+def enabled_plugins() -> set[str]:
+    """Keys in ``plugins.enabled``: the plugins that load on the next reload."""
+    try:
+        plugins = read_config().get("plugins")
+        enabled = plugins.get("enabled") if isinstance(plugins, dict) else None
+        return {str(k) for k in enabled} if isinstance(enabled, list) else set()
+    except Exception:
+        return set()
 
 
 def clip(text: Any, n: int = 160) -> str:

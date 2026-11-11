@@ -110,11 +110,24 @@ check("create makes an empty plugin", out.get("ok") and (HOME / "plugins" / "hel
 (HOME / "plugins" / "helper" / "__init__.py").write_text(
     "def register(ctx):\n    ctx.register_tool(name='helper_ping', toolset='helper', handler=lambda a, **k: 'pong',\n"
     "        schema={'name': 'helper_ping', 'description': 'ping', 'parameters': {'type': 'object', 'properties': {}}})\n")
-check("enabling Hermes' own plugin needs no card", directive("plugin_manager", {"action": "enable", "name": "helper"}, "thread-x")[0] is None)
+a, m, k = directive("plugin_manager", {"action": "enable", "name": "helper"}, "thread-x")
+check("by default, enabling Hermes' own plugin shows a card in any chat, pinned to its code",
+      a == "approve" and "__init__.py" in m and k.startswith("plugin-manager:enable:helper:"), (a, m, k))
+cfg = yaml.safe_load((HOME / "config.yaml").read_text())
+cfg["plugins"].setdefault("entries", {})["hermes-manager"] = {"settings": {"trust_own_items": True}}
+(HOME / "config.yaml").write_text(yaml.safe_dump(cfg))
+check("with trust_own_items: true it needs no card",
+      directive("plugin_manager", {"action": "enable", "name": "helper"}, "thread-x")[0] is None)
+cfg["plugins"]["entries"].pop("hermes-manager")
+(HOME / "config.yaml").write_text(yaml.safe_dump(cfg))
 out = J(hm._tool({"action": "enable", "name": "helper"}, session_id="thread-x"))
+a, m, _ = directive("write_file", {"path": str(HOME / "plugins" / "helper" / "__init__.py"), "content": "x"}, "thread-x")
+check("editing Hermes' own plugin while it is on shows a card", a == "approve" and "turned on" in m, (a, m))
 discover_plugins(force=True)
 hm = get_plugin_manager()._plugins["hermes-manager"].module
 check("enabled plugin loads and registers its tool", registry.get_entry("helper_ping") is not None, out)
+rows = {r["key"]: r for r in J(hm._tool({"action": "list"}))["plugins"]}
+check("list shows it loaded (from Hermes' list_plugins)", rows.get("helper", {}).get("loaded") is True, rows.get("helper"))
 a, m, k = directive("plugin_manager", {"action": "rename", "name": "hermes-manager", "new_name": "x"}, "main")
 out = J(hm._tool({"action": "rename", "name": "hermes-manager", "new_name": "xx"}, session_id="main"))
 check("manager refuses to rename itself", out.get("ok") is False, out)

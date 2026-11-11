@@ -6,7 +6,6 @@ import json
 import sqlite3
 import sys
 import tempfile
-import threading
 import types
 from contextlib import contextmanager
 from pathlib import Path
@@ -56,17 +55,16 @@ def save_disabled(cfg, disabled, platform=None):
     CONFIG.clear(); CONFIG.update(copy.deepcopy(cfg))
 
 
-for pkg in ("hermes_cli", "tools", "agent", "tui_gateway"):
+for pkg in ("hermes_cli", "tools", "agent"):
     mod(pkg)
 mod("hermes_constants", get_hermes_home=lambda: str(HOME))
 mod("hermes_cli.config", read_raw_config=lambda: copy.deepcopy(CONFIG),
     save_config=lambda c: (CONFIG.clear(), CONFIG.update(copy.deepcopy(c))))
-mod("hermes_cli.plugins_cmd", _discover_all_plugins=lambda: list(PLUGINS), _plugins_dir=lambda: HOME / "plugins",
-    dashboard_set_agent_plugin_enabled=toggle)
+mod("hermes_cli.plugins_cmd", _discover_all_plugins=lambda: list(PLUGINS), dashboard_set_agent_plugin_enabled=toggle)
 mod("hermes_cli.plugins_activation", reload_running_gateway=lambda: (calls.append("gateway"),
                                                                      {"reloaded": True, "plugins": ["a"]})[1],
     notify_serve_backend=lambda name, home: None)
-mod("hermes_cli.plugins", get_plugin_manager=lambda: types.SimpleNamespace(_plugins={}))
+mod("hermes_cli.plugins", get_plugin_manager=lambda: types.SimpleNamespace(list_plugins=lambda: []))
 mod("hermes_cli.skills_config",
     get_disabled_skills=lambda cfg, platform=None: set((cfg.get("skills") or {}).get("disabled") or []) - {"hermes-agent"},
     save_disabled_skills=save_disabled)
@@ -94,9 +92,10 @@ spec.loader.exec_module(hm)
 from hermes_manager import ledger, mcp_manager, skill_manager  # noqa: E402
 
 con = sqlite3.connect(HOME / "state.db")
-con.execute("CREATE TABLE sessions (id TEXT, pinned INT, archived INT, source TEXT, profile_name TEXT, started_at REAL)")
-con.execute("INSERT INTO sessions VALUES ('main', 1, 0, 'mobile-web', NULL, 1)")
-con.execute("INSERT INTO sessions VALUES ('thread', 0, 0, 'mobile-web', NULL, 2)")
+con.execute("CREATE TABLE sessions (id TEXT, pinned INT, archived INT, source TEXT, profile_name TEXT, started_at REAL, "
+            "title TEXT)")
+con.execute("INSERT INTO sessions VALUES ('main', 1, 0, 'mobile-web', NULL, 1, NULL)")
+con.execute("INSERT INTO sessions VALUES ('thread', 0, 0, 'mobile-web', NULL, 2, NULL)")
 con.execute("CREATE TABLE session_admissions (target_session_id TEXT, status TEXT)")
 con.execute("CREATE TABLE worker_executions (session_id TEXT, status TEXT)")
 con.commit(); con.close()
@@ -104,6 +103,15 @@ con.commit(); con.close()
 
 def J(s):
     return json.loads(s)
+
+
+def trust(on):
+    """plugins.entries.hermes-manager.settings.trust_own_items (None removes it: the default)."""
+    entries = CONFIG.setdefault("plugins", {}).setdefault("entries", {})
+    if on is None:
+        entries.pop("hermes-manager", None)
+    else:
+        entries["hermes-manager"] = {"settings": {"trust_own_items": on}}
 
 
 def make_plugin(key, body="def register(ctx):\n    pass\n", manifest=None):
@@ -242,8 +250,9 @@ def test_skills_hermes_creates_are_its_own_no_card():
     assert J(skill_manager.tool({"action": "disable", "name": "my-skill"}, session_id="thread"))["ok"]
 
 
-def test_plugin_create_enable_delete_own_without_card():
+def test_plugin_create_enable_delete_own_without_card_when_trusted():
     calls.clear()
+    trust(True)
     out = J(hm._tool({"action": "create", "name": "helper", "description": "Helps"}, session_id="thread"))
     assert out["ok"] and (HOME / "plugins" / "helper" / "plugin.yaml").exists() and ledger.owned("plugin", "helper")
     assert "created_by: hermes" in (HOME / "plugins" / "helper" / "plugin.yaml").read_text()
@@ -258,6 +267,65 @@ def test_plugin_create_enable_delete_own_without_card():
     assert out["ok"] and not (HOME / "plugins" / "helper").exists() and Path(out["backup"]).exists()
     assert not ledger.owned("plugin", "helper")
     PLUGINS[:] = [p for p in PLUGINS if p[0] != "helper"]
+    trust(None)
+
+
+def test_by_default_turning_on_hermes_own_plugin_asks_in_any_chat_and_pins_the_code():
+    trust(None)
+    CONFIG["plugins"]["enabled"] = []
+    out = J(hm._tool({"action": "create", "name": "fresh", "description": "Does a thing"}, session_id="thread"))
+    assert out["ok"], out
+    folder = HOME / "plugins" / "fresh"
+    PLUGINS.append(("fresh", "0.1.0", "Does a thing", "user", str(folder), "fresh"))
+    assert hm._pre_tool_call(tool_name="write_file", args={"path": str(folder / "__init__.py"), "content": "x"}) is None, \
+        "writing a Hermes-made plugin that is still off needs no card"
+    r = hm._pre_tool_call(tool_name="plugin_manager", args={"action": "enable", "name": "fresh"}, session_id="thread")
+    assert r["action"] == "approve", "a card, and not a main-chat block: any chat may ask"
+    assert "Hermes made it: Does a thing" in r["message"] and "__init__.py" in r["message"] and "plugin.yaml" in r["message"]
+    assert r["rule_key"].startswith("plugin-manager:enable:fresh:") and "exact code" in r["message"]
+    (folder / "__init__.py").write_text("def register(ctx):\n    print('changed')\n")
+    r2 = hm._pre_tool_call(tool_name="plugin_manager", args={"action": "enable", "name": "fresh"}, session_id="thread")
+    assert r2["rule_key"] != r["rule_key"], "Always allow never covers code that changed after the card"
+    assert J(hm._tool({"action": "enable", "name": "fresh"}, session_id="thread"))["ok"], \
+        "after the card the tool runs from that chat"
+    r = hm._pre_tool_call(tool_name="write_file", args={"path": str(folder / "__init__.py"), "content": "y"})
+    assert r["action"] == "approve" and "a plugin Hermes made that is turned on" in r["message"]
+    r = hm._pre_tool_call(tool_name="terminal", args={"command": f"sed -i '' s/a/b/ {folder}/__init__.py"})
+    assert r["action"] == "approve"
+    for a in ("disable", "delete"):
+        assert hm._pre_tool_call(tool_name="plugin_manager", args={"action": a, "name": "fresh"},
+                                 session_id="thread") is None, f"{a} of Hermes' own plugin runs no new code: no card"
+    de = J(hm._tool({"action": "delete", "name": "fresh"}, session_id="thread"))
+    assert de["ok"] and de["was_enabled"]
+    PLUGINS[:] = [p for p in PLUGINS if p[0] != "fresh"]
+    r = hm._pre_tool_call(tool_name="plugin_manager", args={"action": "undo", "id": de["change_id"]}, session_id="thread")
+    assert r["action"] == "approve" and "turn it ON again" in r["message"], "undoing the delete turns code on: it asks"
+    J(hm._tool({"action": "undo", "id": de["change_id"]}, session_id="thread"))
+    PLUGINS.append(("fresh", "0.1.0", "Does a thing", "user", str(folder), "fresh"))
+    trust(False)   # anything but a real true counts as off
+    assert hm._pre_tool_call(tool_name="plugin_manager", args={"action": "enable", "name": "fresh"}, session_id="thread")
+    CONFIG["plugins"]["entries"]["hermes-manager"] = {"settings": {"trust_own_items": "yes"}}
+    assert hm._pre_tool_call(tool_name="plugin_manager", args={"action": "enable", "name": "fresh"}, session_id="thread")
+    trust(True)
+    assert hm._pre_tool_call(tool_name="plugin_manager", args={"action": "enable", "name": "fresh"}, session_id="thread") is None
+    trust(None)
+    J(hm._tool({"action": "delete", "name": "fresh"}, session_id="thread"))
+    PLUGINS[:] = [p for p in PLUGINS if p[0] != "fresh"]
+
+
+def test_changing_the_trust_setting_by_hand_asks():
+    r = hm._pre_tool_call(tool_name="terminal",
+                          args={"command": "hermes config set plugins.entries.hermes-manager.settings.trust_own_items true"})
+    assert r["action"] == "approve" and "trust_own_items" in r["message"]
+    r = hm._pre_tool_call(tool_name="patch", args={"path": str(HOME / "config.yaml"), "new_string": "trust_own_items: true"})
+    assert r["action"] == "approve"
+    assert hm._pre_tool_call(tool_name="terminal", args={"command": "grep trust_own_items ~/.hermes/config.yaml"}) is None
+
+
+def test_enabling_a_plugin_with_capabilities_says_they_stay_off():
+    make_plugin("capy", manifest="name: capy\ncapabilities: [platform_actions]\n")
+    out = J(hm._tool({"action": "enable", "name": "capy"}, session_id="main"))
+    assert out["ok"] and "hermes plugins capabilities capy" in out["summary"], out
 
 
 def test_own_plugin_asking_for_env_or_packages_still_needs_a_card():
@@ -390,14 +458,18 @@ def test_busy_check_still_guards_reloads():
 
 
 def test_slash_waits_while_another_chat_is_mid_reply():
-    server = mod("tui_gateway.server", _sessions_lock=threading.RLock(),
-                 _sessions={"r1": {"session_key": "me", "running": True},
-                            "r2": {"session_key": "other", "title": "Budget", "running": True}})
-    out = asyncio.run(hm._slash("", session_key="me"))
-    assert out.startswith("Not reloading: 1 other chat") and "Budget" in out
-    server._sessions["r2"]["running"] = False
-    assert "Gateway: reloaded" in asyncio.run(hm._slash("", session_key="me"))
-    del sys.modules["tui_gateway.server"]
+    con = sqlite3.connect(HOME / "state.db")
+    con.execute("INSERT INTO sessions VALUES ('other', 0, 0, 'tui', NULL, 3, 'Budget')")
+    con.executemany("INSERT INTO session_admissions VALUES (?, 'running')", [("me",), ("other",)])
+    con.commit()
+    try:
+        out = asyncio.run(hm._slash("", session_id="me"))
+        assert out.startswith("Not reloading: 1 other chat") and "Budget" in out, out
+        con.execute("DELETE FROM session_admissions WHERE target_session_id='other'"); con.commit()
+        assert "Gateway: reloaded" in asyncio.run(hm._slash("", session_id="me"))
+    finally:
+        con.execute("DELETE FROM session_admissions"); con.execute("DELETE FROM sessions WHERE id='other'")
+        con.commit(); con.close()
 
 
 def test_no_main_chat_found_fails_closed():
@@ -460,6 +532,7 @@ def test_mcp_add_refused_for_users_server_is_not_hermes_and_cannot_be_removed():
 def test_undo_pairs_plugins_create_enable_delete_restore_rename():
     calls.clear()
     CONFIG["plugins"] = {"enabled": []}
+    trust(True)
     cr = J(hm._tool({"action": "create", "name": "undo-me"}, session_id="thread"))
     folder = HOME / "plugins" / "undo-me"
     PLUGINS.append(("undo-me", "0.1.0", "x", "user", str(folder), "undo-me"))
@@ -487,10 +560,12 @@ def test_undo_pairs_plugins_create_enable_delete_restore_rename():
     PLUGINS[:] = [p for p in PLUGINS if p[0] != "rn-two"] + [("rn", "1", "x", "user", str(HOME / "plugins" / "rn"), "rn")]
     rl = J(hm._tool({"action": "reload", "now": True}, session_id="main"))
     assert "has no undo" in undo(rl["change_id"])["error"]
+    trust(None)
 
 
 def test_undo_cards_follow_the_same_rules():
     CONFIG["skills"] = {"disabled": []}
+    trust(True)
     sk = J(skill_manager.tool({"action": "disable", "name": "notes"}, session_id="main"))
     a = {"action": "undo", "id": sk["change_id"]}
     r = hm._pre_tool_call(tool_name="plugin_manager", args=a, session_id="main")
@@ -532,6 +607,7 @@ def test_undo_cards_follow_the_same_rules():
         assert asyncio.run(hm._undo_slash("")) == "Nothing to undo."
     finally:
         f.with_suffix(".bak").rename(f)
+    trust(None)
 
 
 def test_login_returns_the_link_or_a_clear_reason():

@@ -1,4 +1,5 @@
-"""A card before Hermes installs code from the internet into its own home (plugin or MCP dependencies).
+"""Cards for file and terminal tool calls: installing code from the internet into Hermes' home, editing
+plugin files, and changing hermes-manager's own trust setting.
 
 Only terminal commands that both download code (pip/uv/npm/pnpm/yarn/bun install, git clone, curl|sh)
 AND point into ~/.hermes are carded, so coding work in other repos is untouched. "Always allow" covers
@@ -8,6 +9,7 @@ that exact command only.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 from pathlib import Path
@@ -35,11 +37,35 @@ def install_card(tool_name: str, args: dict) -> Optional[dict]:
             "message": f"Install code from the internet into Hermes? Command: {common.clip(command, 300)}"}
 
 
-# ---- edits to the user's plugins --------------------------------------------------------------------
-# Editing a plugin the user made (anything not in the ledger) needs their approval.
+# ---- the trust setting ------------------------------------------------------------------------------
+# trust_own_items lifts the card on Hermes' own plugins, so Hermes writing it by hand would undo the card
+# it is meant to keep. Writing it through a file or shell tool asks. A speed bump, not a sandbox.
+
+def setting_card(tool_name: str, args: dict) -> Optional[dict]:
+    if tool_name not in ("write_file", "patch", "terminal", "execute_code") or not isinstance(args, dict):
+        return None
+    try:
+        blob = json.dumps(args)
+    except (TypeError, ValueError):
+        return None
+    if "trust_own_items" not in blob:
+        return None
+    code = str(args.get("command") or args.get("code") or "")
+    if tool_name in ("terminal", "execute_code") and not (WRITE_OPS.search(code) or CONFIG_SET.search(code)):
+        return None   # reading it is fine
+    digest = hashlib.sha256(blob.encode()).hexdigest()[:10]
+    return {"action": "approve", "rule_key": f"hermes-manager:setting:{digest}",
+            "message": "Change hermes-manager's trust_own_items setting? When it is true, Hermes turns on and "
+                       f"edits plugins it made with no card. {tool_name}: {common.clip(code or args.get('path'), 200)}"}
+
+
+# ---- edits to plugin files --------------------------------------------------------------------
+# Editing a plugin the user made (anything not in the ledger) needs their approval. So does editing a plugin
+# Hermes made while it is turned on (the edit runs at the next reload), unless trust_own_items is set.
 WRITE_OPS = re.compile(r">|\btee\b|\bsed\s+-i|\bperl\s+-p?i|\bmv\b|\bcp\b|\brm\b|\brsync\b|\btruncate\b|\bpatch\b"
                        r"|\bgit\s+(?:apply|checkout|restore|reset)\b|\bpython3?\b|\bnode\b|\bln\b|\bchmod\b|\btouch\b"
                        r"|write_text|open\([^)]*['\"][wa]")
+CONFIG_SET = re.compile(r"\bconfig\s+set\b")
 
 
 def _plugin_keys(text: str) -> set[str]:
@@ -76,8 +102,11 @@ def edit_card(tool_name: str, args: dict) -> Optional[dict]:
         text = f"{args.get('command') or args.get('code') or ''} {args.get('workdir') or ''}"
         if not WRITE_OPS.search(str(args.get("command") or args.get("code") or "")):
             return None
-    theirs = sorted(k for k in _plugin_keys(text) if not ledger.owned("plugin", k))
-    if not theirs:
+    keys = _plugin_keys(text)
+    theirs = sorted(k for k in keys if not ledger.owned("plugin", k))
+    live_own = [] if common.trust_own_items() else sorted(
+        k for k in keys if ledger.owned("plugin", k) and k in common.enabled_plugins())
+    if not theirs and not live_own:
         return None
     what = common.clip(args.get("command") or args.get("code") or args.get("path") or "", 200)
     # "Always allow" covers one file, not the whole plugin.
@@ -86,6 +115,10 @@ def edit_card(tool_name: str, args: dict) -> Optional[dict]:
     else:   # terminal / execute_code / multi-file patch: no single file, so pin the exact text
         grain, scope = str(args.get("command") or args.get("code") or args.get("patch") or ""), "this exact command"
     sha8 = hashlib.sha256(grain.encode()).hexdigest()[:8]
-    return {"action": "approve", "rule_key": f"hermes-manager:edit:{','.join(theirs)}:{sha8}",
-            "message": f"Edit your plugin {', '.join(theirs)}? Hermes didn't make it. {tool_name}: {what}. "
-                       f"Always allow covers only {scope}."}
+    if theirs:
+        ask = f"Edit your plugin {', '.join(theirs)}? Hermes didn't make it."
+    else:
+        ask = (f"Edit {', '.join(live_own)}, a plugin Hermes made that is turned on? The change runs at the next "
+               "reload.")
+    return {"action": "approve", "rule_key": f"hermes-manager:edit:{','.join(theirs or live_own)}:{sha8}",
+            "message": f"{ask} {tool_name}: {what}. Always allow covers only {scope}."}
