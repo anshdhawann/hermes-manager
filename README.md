@@ -1,6 +1,6 @@
 # hermes-manager
 
-<p align="center"><img src="assets/repo-image.png" alt="Hermes agent being handed hermes-manager" width="560"></p>
+<p align="center"><img src="assets/repo-image.jpg" alt="Hermes agent being handed hermes-manager" width="560"></p>
 
 A plugin for [Hermes Agent](https://github.com/NousResearch/hermes-agent) that lets Hermes manage its own
 plugins, skills and MCP servers while it runs: no gateway restart, an approval card before any plugin code
@@ -81,11 +81,14 @@ Read this before you install it.
    - every plugin rename, even of one Hermes made,
    - every MCP `add`, because it runs a program or connects to a URL,
    - enabling any plugin, even one Hermes made, whose `plugin.yaml` asks for env keys, packages to install, capabilities or a sign-in. Capabilities stay off even then: Hermes grants them only after you consent in Terminal (`hermes plugins capabilities <name>`, then `hermes plugins enable <name>`),
-   - terminal commands that install code from the internet (pip, uv, npm, pnpm, yarn, bun, `git clone`, `curl | sh`) into `~/.hermes`.
+   - terminal commands that install code from the internet (pip, uv, npm, pnpm, yarn, bun, `npx`, `uvx`, `git clone`, `curl | sh`) into `~/.hermes`.
 
-   Two more cards also show in any chat, not just the main one:
+   Three more cards also show in any chat, not just the main one:
    - editing files of a plugin Hermes didn't make (write_file, patch, or a terminal command that writes there). "Always allow" covers only that one file (key `hermes-manager:edit:<plugin>:<file hash>`); for a terminal command it covers only that exact command.
    - installing code from the internet into `~/.hermes` (the item above).
+   - a terminal `hermes plugins|mcp|skills install|enable|disable|remove|...` command, which would otherwise skip these checks. "Always allow" covers only that exact command.
+
+   Paths are compared after resolving them (the terminal `workdir`, a `cd` in the command, `~`, `$HOME`, `$HERMES_HOME`, `/./`, `..` and symlinks), and a card always shows the whole command. A command too long to show on a card is refused.
 
    Each card's "Always allow" covers one action on one item. For example, `skill-manager:disable:notes` never covers another skill or another action. An MCP add's key also includes the exact command, so "Always" never pre-approves a different program.
 4. **Always.**
@@ -94,6 +97,10 @@ Read this before you install it.
    - Every change, with or without a card, is added to `~/.hermes/hermes-manager/changes.jsonl` (when, which chat, tool, action, item, whether it needed a card, result).
 
 The ledger file `~/.hermes/hermes-manager/ledger.json` records which items Hermes made. Only this plugin writes it, and a `created_by` label in plugin.yaml is never trusted. File and terminal tool calls that would edit the ledger or log are blocked. That block is a guard against mistakes, not a sandbox: any program running as you could still edit the file.
+
+### What the cards are, and what they are not
+
+The cards check what Hermes **means** to do, from the tool call it sends. They catch mistakes and make sure you see each change to your things before it happens. They are **not a security boundary**. Hermes can run terminal commands and code as you, so a command that builds a path while it runs (`$(...)`, a string joined in Python), a script written in one step and run in the next, or a program that edits files itself is not seen. If you need Hermes to be unable to touch something, run it in a sandbox or as another user. Ownership works the same way: an item counts as Hermes' own only while it is the same thing Hermes made (same plugin folder, same MCP entry), so removing one and making a new one by hand under the same name makes it yours again.
 
 ## Settings
 
@@ -186,12 +193,19 @@ If Hermes adds public seams for these, the plugin will move to them.
 
 ## Tests
 
-`python3 -I tests/test_hermes_manager.py` runs the unit tests with Hermes stubbed out.
+`~/.hermes/hermes-agent/venv/bin/python -I tests/test_hermes_manager.py` runs the unit tests with Hermes stubbed out. Any Python 3.11+ with PyYAML works; without PyYAML the tests stop and say so.
 
 `scripts/livetest.sh` runs real Hermes in a throwaway home. It covers a real MCP server, a real skill and
 a real plugin, and never touches `~/.hermes`. Set `HERMES_AGENT_DIR` if your hermes-agent checkout is not
 at `~/.hermes/hermes-agent`.
 
+## Acknowledgements
+
+- Inspired by [DeepSeek Harness](https://www.deepseek.com/en/harness/) (DSH) and dsh-superagent, by DeepSeek.
+- Built for [Hermes Agent](https://github.com/NousResearch/hermes-agent), by Nous Research.
+
+If you share or build on this plugin, please keep this credit. Apache 2.0 asks you to keep the [NOTICE](NOTICE) file with it.
+
 ## License
 
-Apache License 2.0, see [LICENSE](LICENSE). The license covers the code only: the header image (`assets/repo-image.png`) is a widely shared meme that isn't ours, and it is not covered by the license. Not affiliated with Nous Research.
+Apache License 2.0, see [LICENSE](LICENSE). The license covers the code only: the header image (`assets/repo-image.jpg`) is a widely shared meme that isn't ours, and it is not covered by the license. Not affiliated with DeepSeek or Nous Research.

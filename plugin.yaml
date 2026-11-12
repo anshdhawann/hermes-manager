@@ -1,5 +1,5 @@
 name: hermes-manager
-version: 0.4.0
+version: 0.4.1
 description: >-
   Let Hermes manage its own plugins, skills and MCP servers without a restart. Tools: plugin_manager
   (list, create, enable, disable, delete, rename, reload, log, undo), skill_manager (list, enable, disable) and

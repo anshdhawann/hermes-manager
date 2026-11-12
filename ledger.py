@@ -45,13 +45,35 @@ def _read() -> dict[str, dict]:
 
 def _write(data: dict) -> None:
     folder().mkdir(parents=True, exist_ok=True)
-    tmp = _path().with_suffix(".tmp")
+    tmp = _path().with_suffix(f".{os.getpid()}.{uuid.uuid4().hex[:6]}.tmp")
     tmp.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
     os.replace(tmp, _path())
 
 
+def _fingerprint(kind: str, name: str) -> Optional[str]:
+    """What the item is now, so a record cannot vouch for a different thing later given the same name:
+    the plugin folder's inode, or the MCP entry's digest. None when it does not exist (or for skills)."""
+    try:
+        if kind == "plugin":
+            st = (common.home() / "plugins" / name).stat()
+            return f"{st.st_dev}:{st.st_ino}"
+        if kind == "mcp":
+            entry = (common.read_config().get("mcp_servers") or {}).get(name)
+            return common.digest({k: v for k, v in entry.items() if k != "enabled"}) if isinstance(entry, dict) else None
+    except (OSError, AttributeError, TypeError, ValueError):
+        return None
+    return None
+
+
 def owned(kind: str, name: str) -> bool:
-    return bool(name) and name in _read().get(kind, {})
+    """Hermes made it, and it is still the same thing (removed and re-made by hand under the same name is not).
+    ponytail: skills carry no fingerprint (only skill_manage writes them), add one if hand-made skills matter."""
+    rec = _read().get(kind, {}).get(name) if name else None
+    if rec is None:
+        return False
+    was = rec.get("fp") if isinstance(rec, dict) else None
+    now = _fingerprint(kind, name) if was else None
+    return was is None or now is None or was == now
 
 
 def names(kind: str) -> list[str]:
@@ -61,7 +83,8 @@ def names(kind: str) -> list[str]:
 def add(kind: str, name: str, chat: Optional[str] = None, **extra: Any) -> None:
     with _lock:
         data = _read()
-        data[kind][name] = {"created_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "chat": chat, **extra}
+        data[kind][name] = {"created_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "chat": chat,
+                            "fp": _fingerprint(kind, name), **extra}
         _write(data)
 
 
@@ -77,6 +100,7 @@ def rename(kind: str, old: str, new: str) -> None:
         data = _read()
         if old in data[kind]:
             data[kind][new] = {**data[kind].pop(old), "renamed_from": old}
+            data[kind][new]["fp"] = _fingerprint(kind, new) or data[kind][new].get("fp")
             _write(data)
 
 
@@ -151,18 +175,25 @@ FILE_TOOLS = {"write_file", "patch", "terminal", "execute_code"}
 
 
 def guard_files(tool_name: str, args: dict) -> Optional[dict]:
-    """Block file and shell tool calls that would edit the ledger or change log by hand."""
-    if tool_name not in FILE_TOOLS:
+    """Block file and shell tool calls that would edit the ledger or change log by hand. Paths are compared
+    resolved (workdir, cd, ~, $HERMES_HOME, /./, symlinks); the old text match stays as a second net."""
+    if tool_name not in FILE_TOOLS or not isinstance(args, dict):
         return None
+    from . import guards
     try:
-        blob = json.dumps(args or {})
+        blob = json.dumps(args)
     except (TypeError, ValueError):
         return None
-    if f"{DIRNAME}/ledger" in blob or f"{DIRNAME}/changes" in blob or f"{DIRNAME}\\\\ledger" in blob:
-        if tool_name == "terminal" and not any(w in blob for w in (">", "rm ", "mv ", "cp ", "sed -i", "tee",
-                                                                  "python", "perl", "truncate", "echo", "cat >")):
-            return None   # reading it (cat, tail, jq) is fine
-        return {"action": "block",
-                "message": "The hermes-manager ledger and change log are written only by the manager tools. "
-                           "Read them with plugin_manager action=log."}
-    return None
+    if tool_name in ("write_file", "patch"):
+        blob = json.dumps([args.get("path"), args.get("patch")])
+    roots = {Path(os.path.normpath(folder())), Path(os.path.realpath(folder()))}
+    hit = (f"{DIRNAME}/ledger" in blob or f"{DIRNAME}/changes" in blob or f"{DIRNAME}\\\\ledger" in blob
+           or any(p in roots or p.parent in roots and p.name.startswith(("ledger", "changes"))
+                  for p in guards.touched(tool_name, args, guess_home=True)))
+    if not hit:
+        return None
+    if tool_name == "terminal" and not guards.writes(str(args.get("command") or "")):
+        return None   # reading it (cat, tail, jq) is fine
+    return {"action": "block",
+            "message": "The hermes-manager ledger and change log are written only by the manager tools. "
+                       "Read them with plugin_manager action=log."}

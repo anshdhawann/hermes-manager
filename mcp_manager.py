@@ -21,9 +21,11 @@ import hashlib
 import json
 import logging
 import threading
+import urllib.parse
 from typing import Any, Optional
 
 from . import common, ledger
+from .guards import CARD_MAX
 
 log = logging.getLogger("hermes_manager.mcp")
 TOOL = "mcp_manager"
@@ -75,19 +77,23 @@ def _servers_raw() -> dict[str, dict]:
     return servers if isinstance(servers, dict) else {}
 
 
-def _runs(cfg: dict) -> str:
-    """What the server runs, for cards and lists: the command line or URL, env var names only."""
+def _runs(cfg: dict, full: bool = False) -> str:
+    """What the server runs: the command line or URL. Lists show env/header names only; cards (full=True)
+    show the whole line, unclipped, with each NAME=${VAR} pair (values are checked to be ${VAR} refs)."""
     from hermes_cli.mcp_config import redact_mcp_probe_text
+    pairs = cfg.get("headers") if cfg.get("url") else cfg.get("env")
+    pairs = pairs if isinstance(pairs, dict) and pairs else {}
     if cfg.get("url"):
-        text = str(cfg["url"])
-        if isinstance(cfg.get("headers"), dict) and cfg["headers"]:
-            text += f" (headers: {', '.join(sorted(map(str, cfg['headers'])))})"
+        text = redact_mcp_probe_text(str(cfg["url"]))
     else:
         args = cfg.get("args") if isinstance(cfg.get("args"), list) else []
-        text = " ".join([str(cfg.get("command") or "?"), *map(str, args)])
-        if isinstance(cfg.get("env"), dict) and cfg["env"]:
-            text += f" (env: {', '.join(sorted(map(str, cfg['env'])))})"
-    return common.clip(redact_mcp_probe_text(text), 300)
+        text = redact_mcp_probe_text(" ".join([str(cfg.get("command") or "?"), *map(str, args)]))
+    if pairs:
+        label = "headers" if cfg.get("url") else "env"
+        shown = (", ".join(f"{k}: {v}" if label == "headers" else f"{k}={v}" for k, v in sorted(pairs.items()))
+                 if full else ", ".join(sorted(map(str, pairs))))
+        text += f" ({label}: {shown})"
+    return text if full else common.clip(text, 300)
 
 
 def _status(name: Optional[str] = None) -> list[dict]:
@@ -189,6 +195,23 @@ def _check_refs(kind: str, values: Any) -> Optional[str]:
     return None
 
 
+LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1"}
+
+
+def _base(cmd: Any) -> str:
+    return str(cmd).replace("\\", "/").rsplit("/", 1)[-1].lower()
+
+
+def _runs_a_shell(command: str, args: list) -> bool:
+    """A shell as the command, also behind ``env [-i] [VAR=x ...] bash``."""
+    words = [command, *map(str, args)]
+    while words and _base(words[0]) == "env":
+        words = words[1:]
+        while words and (words[0].startswith("-") or "=" in words[0]):
+            words = words[1:]
+    return bool(words) and _base(words[0]) in SHELLS
+
+
 def _build_entry(args: dict) -> tuple[Optional[dict], Optional[str]]:
     url = str(args.get("url") or "").strip()
     command = str(args.get("command") or "").strip()
@@ -196,7 +219,12 @@ def _build_entry(args: dict) -> tuple[Optional[dict], Optional[str]]:
         return None, "add needs exactly one of url (remote server) or command (local program)."
     entry: dict[str, Any] = {}
     if url:
-        if not url.startswith(("https://", "http://localhost", "http://127.0.0.1")):
+        try:
+            u = urllib.parse.urlsplit(url)
+            host = (u.hostname or "").lower()
+        except ValueError:
+            u, host = None, ""
+        if not u or not host or not (u.scheme == "https" or u.scheme == "http" and host in LOCAL_HOSTS):
             return None, "url must be https:// (or http://localhost for a server on this computer)."
         if args.get("env"):
             return None, "env is for local (command) servers only; remote servers take headers."
@@ -207,11 +235,10 @@ def _build_entry(args: dict) -> tuple[Optional[dict], Optional[str]]:
         if args.get("headers"):
             entry["headers"] = {str(k): str(v).strip() for k, v in args["headers"].items()}
     else:
-        base = command.replace("\\", "/").rsplit("/", 1)[-1].lower()
-        if base in SHELLS:
+        cmd_args = args.get("args") or []
+        if _runs_a_shell(command, cmd_args if isinstance(cmd_args, list) else []):
             return None, ("A shell as the server command is refused from chat. If the user really wants this, "
                           "they can run `hermes mcp add` in Terminal.")
-        cmd_args = args.get("args") or []
         if not isinstance(cmd_args, list) or not all(isinstance(a, (str, int, float)) for a in cmd_args):
             return None, "args must be a list of strings."
         if args.get("headers"):
@@ -425,7 +452,11 @@ def card(args: dict, session_id: Optional[str] = None) -> Optional[dict]:
         if err:
             return None   # the tool itself refuses with the reason; nothing to approve
         key += f":{_entry_digest(entry)}"
-        where = ("connects to " if entry.get("url") else "runs this program on this computer: ") + _runs(entry)
+        runs = _runs(entry, full=True)
+        if len(runs) > CARD_MAX:
+            return {"action": "block", "message": f"This server's command is over {CARD_MAX} characters, too long "
+                                                  "to show on an approval card."}
+        where = ("connects to " if entry.get("url") else "runs this program on this computer: ") + runs
         what = f"Add the MCP server {name!r}? It {where}. Its tools reach new chats now and open chats next turn."
     elif action == "enable":
         what = f"Turn ON the MCP server {name!r} now? Its tools are added at the end of open chats (cache kept)."

@@ -63,8 +63,8 @@ SCHEMA = {
         "user's plugins need an approval card and the main chat, and you can't delete them. Every rename needs the card. Editing the files of a plugin you did not make (write_file, patch, terminal) shows the user a card too. After a change: fixed tool and hook code runs at once, even in this chat; new tools and "
         "new prompt text only appear in NEW chats; Hermes core changes and new Python packages need the user "
         "to run `hermes gateway restart`. Reloads wait while another chat is mid-reply unless now=true; pass "
-        "now=true only when the user asked. Never disable a safety plugin (safe-save, outbound-check, "
-        "proof-gate, hermes-security) unless the user asked for exactly that. " + NOTE_UNLOAD
+        "now=true only when the user asked. Never disable a safety plugin (one that checks, blocks or "
+        "reviews other tool calls) unless the user asked for exactly that. " + NOTE_UNLOAD
     ),
     "parameters": {
         "type": "object",
@@ -253,9 +253,9 @@ def _manifest(folder: Path) -> dict:
             try:
                 import yaml
                 data = yaml.safe_load(p.read_text(encoding="utf-8"))
-                return data if isinstance(data, dict) else {}
-            except Exception:
-                return {}
+            except Exception as exc:   # unreadable: it could ask for anything, so say so on the card
+                return {"__error__": f"{type(exc).__name__}"}
+            return data if isinstance(data, dict) else {} if data is None else {"__error__": "not a mapping"}
     return {}
 
 
@@ -266,6 +266,8 @@ def _asks_for_more(name: str) -> list[str]:
         return []
     m = _manifest(found["dir"])
     asks = []
+    if m.get("__error__"):
+        asks.append(f"a plugin.yaml that does not parse ({m['__error__']}), so it could ask for anything")
     for key in ("requires_env", "optional_env"):
         if m.get(key):
             vals = m[key] if isinstance(m[key], list) else [m[key]]
@@ -344,7 +346,7 @@ def _create(name: str, description: str, chat: Optional[str]) -> dict[str, Any]:
     desc = common.clip(description or f"{name} (made by Hermes)", 200).replace('"', "'")
     folder.mkdir(parents=True)
     (folder / "plugin.yaml").write_text(MANIFEST.format(name=name, description=json.dumps(desc)), encoding="utf-8")
-    (folder / "__init__.py").write_text(INIT.format(description=desc), encoding="utf-8")
+    (folder / "__init__.py").write_text(INIT.format(description=desc.replace("\\", "\\\\")), encoding="utf-8")
     ledger.add("plugin", name, chat)
     return {"ok": True, "plugin": name, "dir": str(folder),
             "summary": f"Created {folder} (not enabled). Write its code, then plugin_manager enable. " + NOTE_UNLOAD}

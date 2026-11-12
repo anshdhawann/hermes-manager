@@ -205,20 +205,30 @@ def card(args: dict, session_id: Optional[str] = None) -> Optional[dict]:
 
 def after_tool(tool_name: str, args: dict, result: Any, session_id: Optional[str]) -> None:
     """post_tool_call: remember skills Hermes creates with skill_manage (and forget deleted ones), so
-    it can switch its own skills without a card. Staged (write-gated) creates are not counted."""
+    it can switch its own skills without a card. Staged (write-gated) creates are not counted. Takes the
+    flat call and the ``operations`` batch; in a batch only ops the result reports as done count."""
     if tool_name != "skill_manage" or not isinstance(args, dict):
         return
-    action, name = str(args.get("action") or ""), str(args.get("name") or "").strip()
-    if action not in ("create", "delete") or not name:
-        return
+    ops = args["operations"] if isinstance(args.get("operations"), list) else [args]
     try:
         res = json.loads(result) if isinstance(result, str) else result
     except ValueError:
         return
     if not isinstance(res, dict) or not res.get("success") or res.get("staged"):
         return
-    if action == "create":
-        ledger.add("skill", name, session_id)
-    else:
-        ledger.drop("skill", name)
-    ledger.log("skill_manage", action, name, chat=session_id, card=False, result={"ok": True})
+    done = res.get("results") if isinstance(res.get("results"), list) else None
+    for op in ops:
+        if not isinstance(op, dict):
+            continue
+        action, name = str(op.get("action") or ""), str(op.get("name") or "").strip()
+        if action not in ("create", "delete") or not name:
+            continue
+        if done is not None and not any(isinstance(r, dict) and r.get("success") and r.get("staged") is not True
+                                        and str(r.get("name") or "").strip() == name and r.get("action") == action
+                                        for r in done):
+            continue
+        if action == "create":
+            ledger.add("skill", name, session_id)
+        else:
+            ledger.drop("skill", name)
+        ledger.log("skill_manage", action, name, chat=session_id, card=False, result={"ok": True})

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 import sqlite3
 from pathlib import Path
@@ -98,3 +100,7 @@ def enabled_plugins() -> set[str]:
 def clip(text: Any, n: int = 160) -> str:
     s = re.sub(r"\s+", " ", str(text or "")).strip()
     return s if len(s) <= n else s[: n - 1] + "…"
+
+
+def digest(obj: Any) -> str:
+    return hashlib.sha256(json.dumps(obj, sort_keys=True, default=str).encode()).hexdigest()[:8]

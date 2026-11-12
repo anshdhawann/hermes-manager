@@ -179,11 +179,18 @@ def run(plan: dict, reload_fn) -> dict[str, Any]:
                 common.save_config(snapshot)
             except Exception:
                 pass
-        if "data" in done:
-            shutil.move(str(root / "plugin-data" / plan["new"]), plan["data_dir"])
-        if "dir" in done:
-            shutil.move(plan["target"], plan["dir"])
-            shutil.copy2(backup / "plugin" / plan["old"] / "plugin.yaml", Path(plan["dir"]) / "plugin.yaml")
+        stuck = []
+        for step, fn in (("data", lambda: shutil.move(str(root / "plugin-data" / plan["new"]), plan["data_dir"])),
+                         ("dir", lambda: (shutil.move(plan["target"], plan["dir"]), shutil.copy2(
+                             backup / "plugin" / plan["old"] / "plugin.yaml", Path(plan["dir"]) / "plugin.yaml")))):
+            if step in done:
+                try:
+                    fn()
+                except Exception as undo_exc:
+                    stuck.append(f"{step}: {type(undo_exc).__name__}: {undo_exc}")
+        if stuck:
+            return {"ok": False, "error": f"Rename failed ({type(exc).__name__}: {exc}) and the rollback did not "
+                    f"finish ({'; '.join(stuck)}). Restore by hand from the backup.", "backup": str(backup)}
         return {"ok": False, "error": f"Rename failed and was rolled back: {type(exc).__name__}: {exc}",
                 "backup": str(backup)}
     out: dict[str, Any] = {"ok": True, "renamed": f"{plan['old']} -> {plan['new']}", "backup": str(backup),

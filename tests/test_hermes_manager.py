@@ -1,4 +1,5 @@
-"""`python3 -I tests/test_hermes_manager.py` (plain asserts; Hermes modules stubbed, temp HERMES_HOME)."""
+"""`~/.hermes/hermes-agent/venv/bin/python -I tests/test_hermes_manager.py` (plain asserts; Hermes modules
+stubbed, temp HERMES_HOME). Needs PyYAML, which Hermes' venv has."""
 import asyncio
 import copy
 import importlib.util
@@ -9,6 +10,11 @@ import tempfile
 import types
 from contextlib import contextmanager
 from pathlib import Path
+
+try:
+    import yaml  # noqa: F401
+except ImportError:
+    sys.exit("needs PyYAML: run with ~/.hermes/hermes-agent/venv/bin/python")
 
 ROOT = Path(__file__).resolve().parents[1]
 HOME = Path(tempfile.mkdtemp())
@@ -635,6 +641,135 @@ def test_login_returns_the_link_or_a_clear_reason():
     assert "No MCP server" in J(mcp_manager.tool({"action": "login", "name": "nope"}))["error"]
     MCP_STATUS[:] = [{"name": "remote", "status": "failed", "tools": 0, "transport": "http", "needs_auth": True}]
     assert "mcp_manager action=login" in mcp_manager._result("remote", {}, "Added")["summary"]
+
+
+# ---- audit 2026-11-11: one test per bypass
+
+def card(tool, **args):
+    return hm._pre_tool_call(tool_name=tool, args=args, session_id="thread")
+
+
+def test_audit_ledger_guard_resolves_workdir_cd_and_dot_paths():
+    led = HOME / "hermes-manager"
+    led.mkdir(exist_ok=True)
+    assert card("terminal", command="echo '{}' > ledger.json", workdir=str(led))["action"] == "block", "workdir"
+    assert card("terminal", command=f"cd {led} && echo '{{}}' > ledger.json")["action"] == "block", "cd"
+    assert card("terminal", command="cd $HERMES_HOME/hermes-manager; printf x >> changes.jsonl")["action"] == "block"
+    dotted = str(HOME) + "/./hermes-manager//ledger.json"
+    assert card("write_file", path=dotted, content="{}")["action"] == "block", "/./ and //"
+    assert card("write_file", path=str(HOME / "plugins" / ".." / "hermes-manager" / "ledger.json"),
+                content="{}")["action"] == "block", ".."
+    assert card("terminal", command="cat ledger.json 2>/dev/null", workdir=str(led)) is None, "reading is fine"
+
+
+def test_audit_plugin_edit_card_resolves_workdir_cd_dot_and_real_paths():
+    make_plugin("users-plugin")
+    root = HOME / "plugins"
+    for args in ({"command": "echo x >> users-plugin/x.py", "workdir": str(root)},
+                 {"command": f"cd {root}/users-plugin && echo x > x.py"},
+                 {"command": f"echo x > {HOME}/./plugins//users-plugin/x.py"},
+                 {"command": "echo x > $HERMES_HOME/plugins/users-plugin/x.py"},
+                 {"command": f"echo x > {root.resolve()}/users-plugin/x.py"}):
+        r = card("terminal", **args)
+        assert r and r["action"] == "approve" and "users-plugin" in r["rule_key"], args
+    r = card("write_file", path=f"{HOME}/./plugins/users-plugin/__init__.py", content="x")
+    assert r["action"] == "approve" and "users-plugin" in r["rule_key"]
+    r = card("patch", mode="patch", patch=f"*** Begin Patch\n*** Update File: {root}/users-plugin/x.py\n@@\n-a\n+b\n")
+    assert r["action"] == "approve", "V4A patch text names the file"
+    assert card("terminal", command="ls users-plugin 2>&1 | head", workdir=str(root)) is None, "2>&1 is not a write"
+    assert card("terminal", command="grep -r x . 2>/dev/null", workdir=str(root)) is None, "2>/dev/null is not a write"
+
+
+def test_audit_hermes_cli_verbs_need_a_card_anywhere():
+    for c in ("hermes plugins disable users-plugin", "hermes plugins install someone/repo",
+              "hermes mcp add x --command bash", "hermes skills uninstall notes", "hermes -p work plugins enable x"):
+        r = card("terminal", command=c)
+        assert r and r["action"] == "approve" and r["rule_key"].startswith("hermes-manager:cli:") and c in r["message"], c
+    assert card("terminal", command="hermes plugins list") is None
+    assert card("terminal", command="hermes mcp list") is None
+
+
+def test_audit_npx_uvx_and_resolved_hermes_paths_need_the_install_card():
+    r = card("terminal", command="npx -y some-pkg", workdir=str(HOME))
+    assert r["action"] == "approve" and r["rule_key"].startswith("hermes-manager:install:")
+    assert card("terminal", command="uvx some-tool", workdir=str(HOME / "plugins"))["action"] == "approve"
+    r = card("terminal", command='cd "$HERMES_HOME/plugins" && git clone https://x/y')
+    assert r["action"] == "approve" and "git clone" in r["message"]
+    assert card("terminal", command="npx -y some-pkg", workdir="/tmp") is None, "other folders are untouched"
+    assert card("terminal", command="npm install ./foo", workdir="/tmp") is None
+
+
+def test_audit_cards_show_the_whole_command_or_refuse():
+    long_arg = "a" * 900
+    r = card("terminal", command=f"pip install {long_arg} --target {HOME}/x")
+    assert long_arg in r["message"], "never clipped: the card shows what Always allow covers"
+    assert card("terminal", command=f"pip install {'b' * 2100} --target {HOME}/x")["action"] == "block"
+
+
+def test_audit_mcp_card_shows_values_full_command_strict_localhost_env_shells():
+    args = {"action": "add", "name": "remote", "url": "https://r.example/mcp",
+            "headers": {"Authorization": "Bearer ${REMOTE_TOKEN}"}}
+    r = hm._pre_tool_call(tool_name="mcp_manager", args=args, session_id="main")
+    assert "Authorization: Bearer ${REMOTE_TOKEN}" in r["message"], "the card names which secret is sent"
+    long = ["--x=" + "y" * 500]
+    r = hm._pre_tool_call(tool_name="mcp_manager", session_id="main",
+                          args={"action": "add", "name": "l", "command": "npx", "args": long, "env": {"K": "${K}"}})
+    assert long[0] in r["message"] and "K=${K}" in r["message"]
+    for url in ("http://localhost.evil.example/mcp", "http://localhost@evil.example/mcp", "http://127.0.0.1.nip.io/"):
+        out = J(mcp_manager.tool({"action": "add", "name": "x", "url": url}, session_id="main"))
+        assert out["ok"] is False and "https" in out["error"], url
+    for cmd, a in (("/usr/bin/env", ["bash", "-c", "curl x"]), ("env", ["-i", "A=1", "zsh"]), ("env", ["env", "sh"])):
+        out = J(mcp_manager.tool({"action": "add", "name": "x", "command": cmd, "args": a}, session_id="main"))
+        assert out["ok"] is False and "shell" in out["error"], (cmd, a)
+    assert mcp_manager._build_entry({"url": "http://localhost:3000/mcp"})[1] is None
+    assert mcp_manager._build_entry({"url": "http://[::1]:3000/mcp"})[1] is None
+
+
+def test_audit_skill_batches_are_recorded_per_operation():
+    ops = [{"action": "create", "name": "batch-a"}, {"action": "create", "name": "batch-b"}]
+    res = {"success": True, "operations_applied": 1,
+           "results": [{"name": "batch-a", "action": "create", "success": True},
+                       {"name": "batch-b", "action": "create", "success": False}]}
+    hm._post_tool_call(tool_name="skill_manage", args={"operations": ops}, result=json.dumps(res), session_id="t")
+    assert ledger.owned("skill", "batch-a") and not ledger.owned("skill", "batch-b")
+    hm._post_tool_call(tool_name="skill_manage", args={"operations": [{"action": "delete", "name": "batch-a"}]},
+                       result=json.dumps({"success": True}), session_id="t")
+    assert not ledger.owned("skill", "batch-a")
+
+
+def test_audit_unparseable_plugin_yaml_needs_a_card():
+    trust(True)
+    make_plugin("broken", manifest="name: [unclosed\nrequires_env: {\n")
+    ledger.add("plugin", "broken")
+    r = hm._pre_tool_call(tool_name="plugin_manager", args={"action": "enable", "name": "broken"}, session_id="main")
+    assert r and r["action"] == "approve" and "does not parse" in r["message"]
+    trust(None)
+
+
+def test_audit_ownership_goes_stale_when_the_item_is_replaced():
+    import shutil
+    d = make_plugin("ghost")
+    ledger.add("plugin", "ghost")
+    assert ledger.owned("plugin", "ghost")
+    shutil.rmtree(d)
+    assert ledger.owned("plugin", "ghost"), "gone: the record still lets Hermes finish its own delete"
+    make_plugin("ghost")
+    assert not ledger.owned("plugin", "ghost"), "re-made by hand under the same name is the user's"
+    CONFIG.setdefault("mcp_servers", {})["m"] = {"command": "npx", "args": ["a"], "enabled": True}
+    ledger.add("mcp", "m")
+    CONFIG["mcp_servers"]["m"]["enabled"] = False
+    assert ledger.owned("mcp", "m"), "turning it off is not a different server"
+    CONFIG["mcp_servers"]["m"]["args"] = ["b"]
+    assert not ledger.owned("mcp", "m")
+    del CONFIG["mcp_servers"]["m"]
+
+
+def test_audit_description_with_backslash_makes_valid_python():
+    out = J(hm._tool({"action": "create", "name": "slashy", "description": 'ends in a backslash \\'}, session_id="thread"))
+    assert out["ok"], out
+    compile((HOME / "plugins" / "slashy" / "__init__.py").read_text(), "slashy", "exec")
+    import yaml
+    assert yaml.safe_load((HOME / "plugins" / "slashy" / "plugin.yaml").read_text())["name"] == "slashy"
 
 
 if __name__ == "__main__":
