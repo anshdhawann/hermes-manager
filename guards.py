@@ -64,7 +64,7 @@ def touched(tool_name: str, args: dict, guess_home: bool = False) -> set[Path]:
         code = str(args.get("command") or args.get("code") or "")
         bases = [_expand(str(args["workdir"]))] if args.get("workdir") else []
         for m in _CD.finditer(code):
-            for b in (bases or [""]):
+            for b in list(bases or [""]):  # a copy: appending to the list being walked never ends
                 bases.append(os.path.join(b, _expand(m.group(1))))
         bases = [b for b in bases if os.path.isabs(b)]
         for b in bases:

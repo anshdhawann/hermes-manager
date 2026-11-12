@@ -772,6 +772,14 @@ def test_audit_description_with_backslash_makes_valid_python():
     assert yaml.safe_load((HOME / "plugins" / "slashy" / "plugin.yaml").read_text())["name"] == "slashy"
 
 
+def test_two_cds_in_one_command_do_not_hang():
+    # 2026-11-12: appending to the list being walked looped forever and hung the live gateway.
+    from hermes_manager import guards
+    cmd = "cd /tmp/a && ls x; cd /tmp/b && grep -rn y src"
+    paths = guards.touched("terminal", {"command": cmd, "workdir": "/tmp/w"}, guess_home=True)
+    assert Path("/tmp/b/src") in paths and Path("/tmp/w") in paths
+
+
 if __name__ == "__main__":
     tests = [(n, f) for n, f in globals().items() if n.startswith("test_")]   # file order: later tests read the log
     for name, fn in tests:
